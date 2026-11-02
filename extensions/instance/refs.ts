@@ -15,3 +15,14 @@ export type Preview = {
 
 /** No arguments → the previews that served their UI, running or stopped since; a failed start is not among them. */
 export const ListAction = actionRef<null, Preview[]>('instance', 'list')
+
+/** Another Ultimate project running on this machine. */
+export type Project = {
+  /** Its home, unique per project. */
+  id: string
+  name: string
+  url: string
+}
+
+/** No arguments → the other projects on this machine whose server runs now. */
+export const ProjectsAction = actionRef<null, Project[]>('instance', 'projects')
