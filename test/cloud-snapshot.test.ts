@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { afterAll, beforeAll, expect, it, vi } from 'vitest'
+import { afterAll, expect, it, vi } from 'vitest'
 import { downloadSnapshot, uploadSnapshot } from '../extensions/cloud/snapshot.ts'
 import type { SnapshotManifest } from '../extensions/cloud/snapshot.ts'
 import { vacuum } from '../lib/database-files.ts'
@@ -57,7 +57,13 @@ let manifest: SnapshotManifest
 let progress: [number, number, number][]
 const before: Record<string, string> = {}
 
-beforeAll(async () => {
+/**
+ * The shared repositories and uploaded snapshot, made once by the first test that needs them. About thirty git
+ * processes and a 17 MiB upload: real work, so it runs under the test timeout, not the hook timeout meant for hangs.
+ */
+let prepared: Promise<void> | undefined
+const ready = () => (prepared ??= prepare())
+async function prepare() {
   vi.stubGlobal('fetch', stub.fetch)
   source = await temp('ultimate-snapshot-source-')
   target = join(await temp('ultimate-snapshot-target-'), 'checkout')
@@ -107,13 +113,14 @@ beforeAll(async () => {
     repo: source,
     progress: (done, total, uploaded) => progress.push([done, total, uploaded]),
   })
-})
+}
 afterAll(() => {
   writer?.close()
   vi.unstubAllGlobals()
 })
 
 it('round-trips the database and fetches branches without force, keeping conflicting ones aside', async () => {
+  await ready()
   expect(manifest).toMatchObject({ key, machine: 'desk', database: { chunks: 2 } })
   expect(manifest.bundle?.chunks).toBe(1)
   expect(await contentHash(database)).toBe(manifest.database.sha256)
@@ -164,7 +171,8 @@ it('round-trips the database and fetches branches without force, keeping conflic
   expect(await contentHash(database)).not.toBe(manifest.database.sha256)
 })
 
-it('stores only ciphertext in R2', () => {
+it('stores only ciphertext in R2', async () => {
+  await ready()
   const names = [...stored.keys()]
   const prefix = `${project(key)}/${manifest.id}/`
   expect(names.toSorted()).toEqual(
@@ -217,6 +225,7 @@ it.each<[string, (objects: Map<string, Uint8Array>, prefix: string) => void, Reg
     /failed verification \(manifest 0\)/,
   ],
 ])('rejects %s and leaves nothing behind', async (_, alter, error) => {
+  await ready()
   const saved = new Map([...stored].map(([name, object]) => [name, object.slice()]))
   alter(stored, `${project(key)}/${manifest.id}/`)
   const empty = await temp('ultimate-snapshot-rejected-')
@@ -234,6 +243,7 @@ it.each<[string, (objects: Map<string, Uint8Array>, prefix: string) => void, Reg
 })
 
 it('rejects the wrong secret and the wrong project key', async () => {
+  await ready()
   const empty = await temp('ultimate-snapshot-rejected-')
   await expect(
     downloadSnapshot({ ...remote, secret: 'other', id: manifest.id, dir: empty, repo: target }),
@@ -249,6 +259,7 @@ it('rejects the wrong secret and the wrong project key', async () => {
 })
 
 it('skips the bundle when the repository has no ultimate branches', async () => {
+  await ready()
   const repo = await temp('ultimate-snapshot-plain-')
   await git(repo, 'init', '-b', 'main')
   const path = join(await temp('ultimate-snapshot-small-'), 'state.sqlite')
@@ -269,6 +280,7 @@ it('skips the bundle when the repository has no ultimate branches', async () => 
 })
 
 it('never carries provider logins or secrets that sit next to the database', async () => {
+  await ready()
   // Logins rotate their refresh tokens: a copy on another machine dies on the first refresh, so moves must leave them.
   const home = await temp('ultimate-snapshot-logins-')
   const marker = 'refresh-token-marker-7f3a'
@@ -298,6 +310,7 @@ it('never carries provider logins or secrets that sit next to the database', asy
 })
 
 it('carries a branch checked out in a source worktree, with commits of its own, to a fresh clone', async () => {
+  await ready()
   // A writer's concluded conversations leave branches checked out in their worktrees; the move must take them along.
   const repo = await temp('ultimate-snapshot-worktree-source-')
   await git(repo, 'init', '-b', 'main')
