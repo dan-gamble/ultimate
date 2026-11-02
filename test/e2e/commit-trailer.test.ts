@@ -33,6 +33,7 @@ it.each([0, 1])(
       expect((await bash('git config --list')).stdout.includes('ultimate.test=preserved')).toBe(
         count === 1,
       )
+      expect((await bash('echo "$PI_CODING_AGENT"')).stdout).toBe('true\n')
       await bash('git commit --allow-empty -m x -m "Other-Trailer: kept"')
       expect((await git('log', '-1', '--format=%B')).stdout).toContain(
         'Ultimate-Conversation: 34820',
