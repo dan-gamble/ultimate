@@ -47,8 +47,10 @@ export const docs = [Todos]
 
 const OWNERS = ['user', 'ultimate'] as const
 
-export async function add(tx: Tx, text: unknown, owner: unknown) {
+export async function add(tx: Tx, text: unknown, owner: unknown, link?: unknown) {
   if (typeof text !== 'string' || !text.trim()) throw new Error('text must be nonempty')
+  if (link !== undefined && (typeof link !== 'string' || !/^https?:\/\/\S+$/.test(link.trim())))
+    throw new Error('link must be an http(s) URL')
   if (text.trim().length > TEXT_CHARS)
     throw new Error(`text must be at most ${TEXT_CHARS} characters`)
   if (!OWNERS.includes(owner as Todo['owner']))
@@ -59,6 +61,7 @@ export async function add(tx: Tx, text: unknown, owner: unknown) {
     text: text.trim(),
     owner: owner as Todo['owner'],
     at: Date.now(),
+    ...(typeof link === 'string' ? { link: link.trim() } : {}),
   }
   todos.items.push(todo)
   return todo
@@ -84,7 +87,7 @@ export async function mark(tx: Tx, id: unknown, done: boolean) {
   return { ...todo }
 }
 
-const line = (todo: Todo) => `- ${todo.id}: ${todo.text}`
+const line = (todo: Todo) => `- ${todo.id}: ${todo.text}${todo.link ? ` (${todo.link})` : ''}`
 /** The open to-dos as model text, by owner; undefined when none is open. */
 export function listText(items: readonly Todo[]) {
   const open = items.filter((item) => item.done === undefined)
@@ -131,7 +134,12 @@ const field = (args: unknown, name: string) =>
 export const userActions = ['add', 'done', 'reopen']
 export const actions = {
   add: implementAction(AddAction, (args, { host }) =>
-    host.harness().commit((tx) => add(tx, field(args, 'text'), field(args, 'owner')), context),
+    host
+      .harness()
+      .commit(
+        (tx) => add(tx, field(args, 'text'), field(args, 'owner'), field(args, 'link')),
+        context,
+      ),
   ),
   done: implementAction(DoneAction, (args, { host }) =>
     host.harness().commit((tx) => mark(tx, field(args, 'id'), true), context),
@@ -162,11 +170,12 @@ export default function todosExtension(host: ExtensionHost) {
         name: 'todo',
         deferred: true,
         description:
-          "The project's to-dos, owned by you ('ultimate') or the user ('user'): add {text, owner}, done {id}, list. Keep open loops here, not in codemode store; the user sees and ticks them in the To-dos panel, and their open questions already show there, so never add a to-do for a question. Other projects read this list with ultimate.doc('todos', 1, {project}) and ask you to add through ultimate.tell.",
+          "The project's to-dos, owned by you ('ultimate') or the user ('user'): add {text, owner, link?}, done {id}, list. Keep open loops here, not in codemode store; the user sees and ticks them in the To-dos panel and counts them as waiting on them, and their open questions already show there, so never add a to-do for a question. Give link where the user acts, such as the pull request to merge. Other projects read this list with ultimate.doc('todos', 1, {project}) and ask you to add through ultimate.tell.",
         parameters: Type.Object({
           action: Type.Union([Type.Literal('add'), Type.Literal('done'), Type.Literal('list')]),
           text: Type.Optional(Type.String()),
           owner: Type.Optional(Type.Union([Type.Literal('user'), Type.Literal('ultimate')])),
+          link: Type.Optional(Type.String({ description: 'http(s) URL where it gets done' })),
           id: Type.Optional(Type.Integer({ minimum: 1 })),
         }),
         // Not replay-safe (the default): an interrupted add is never rerun, so it commits at most once.
@@ -180,7 +189,7 @@ export default function todosExtension(host: ExtensionHost) {
                 'Only @ultimate keeps the to-dos; ask @ultimate to add one (message, reply: false).',
               )
             if (args.action === 'add') {
-              const todo = await add(tx, args.text, args.owner)
+              const todo = await add(tx, args.text, args.owner, args.link)
               return `Added ${todo.id} for ${todo.owner}: ${todo.text}`
             }
             if (args.action === 'done') {

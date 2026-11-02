@@ -67,9 +67,10 @@ function MessageNavigation() {
       events.emit('ultimate:reveal-entry', { conversationId: id, entryId: entry })
     const loaded = target.entry ?? (call && callerOf(entries, call.split('/')[0])?.id)
     setTarget(undefined)
+    // Clearing the target re-runs this effect, so a cleanup would cancel the reveal it just scheduled (upstream #13).
     if (loaded) {
-      const frame = requestAnimationFrame(() => reveal(loaded))
-      return () => cancelAnimationFrame(frame)
+      requestAnimationFrame(() => reveal(loaded))
+      return undefined
     }
     if (call)
       api.action(CallerAction, { conversation: id, call }).then(

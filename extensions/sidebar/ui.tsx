@@ -13,3 +13,8 @@ export const UnderUltimate = definePoint<number | undefined, ReactNode>('sidebar
  * Input is @ultimate's conversation id.
  */
 export const Unlisted = definePoint<number | undefined, ReadonlySet<number>>('sidebar.unlisted')
+/**
+ * More that waits on the user beside the questions asked of them (`todos` counts their open to-dos); the sidebar adds
+ * every provider's count to @ultimate's `N waiting on you`.
+ */
+export const Waiting = definePoint<null, number>('sidebar.waiting')

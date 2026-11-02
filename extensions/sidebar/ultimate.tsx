@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import {
+  AllProvided,
   cn,
   ParkedRuns,
   Provided,
@@ -14,10 +15,25 @@ import { MessagesDoc, emptyMessages, waitingOnUser } from '../messages/ui.tsx'
 import { AgentMark, ConversationPhase, useOverview } from '../conversations/ui.tsx'
 import { StandingDoc, talkToUltimate } from '../subagents/ui.tsx'
 import { primaryLabel } from './label.ts'
+import { Waiting } from './ui.tsx'
 
-/** Renders with how many questions wait on the user's answer or dismissal. */
+/** Renders with how much waits on the user: questions to answer or dismiss, plus what `Waiting` providers count. */
 export function WaitingOnUser({ children }: { children: (waiting: number) => ReactNode }) {
-  return children(waitingOnUser(useDocOf(1, MessagesDoc) ?? emptyMessages))
+  const questions = waitingOnUser(useDocOf(1, MessagesDoc) ?? emptyMessages)
+  return (
+    <AllProvided input={null} point={Waiting}>
+      {(counts) => children(counts.reduce((sum, count) => sum + count, questions))}
+    </AllProvided>
+  )
+}
+
+/** Open @ultimate; with something waiting on the user, open the To-dos tab beside it too. */
+export async function openUltimate(
+  actions: Parameters<typeof talkToUltimate>[0] & { openPanel: (id?: string) => void },
+  waiting: number,
+) {
+  await talkToUltimate(actions)
+  if (waiting > 0) actions.openPanel('todos')
 }
 
 /** A busy standing agent's word: its classified phase, lower case like its idle line, else "working". */
@@ -89,7 +105,7 @@ function Primary({ parked }: { parked?: ReadonlySet<number> }) {
                     )}
                     data-ui="ultimate-button"
                     data-ultimate-button
-                    onClick={() => void talkToUltimate(actions)}
+                    onClick={() => void openUltimate(actions, waiting)}
                     type="button"
                   >
                     <AgentMark

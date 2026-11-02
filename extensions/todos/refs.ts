@@ -8,13 +8,18 @@ export type Todo = {
   owner: 'user' | 'ultimate'
   /** When it was added, epoch ms. */
   at: number
+  /** Where it gets done, such as the pull request to merge; an http(s) URL. */
+  link?: string
   done?: number
 }
 /** `{ next, items }` on conversation 1: every open to-do and the last 50 done ones, oldest first. */
 export const TodosDoc = docRef<{ next: number; items: Todo[] }>('todos')
 
 /** `{ text, owner }` → the new to-do. User-only; @ultimate uses its `todo` tool. */
-export const AddAction = actionRef<{ text: string; owner: Todo['owner'] }, Todo>('todos', 'add')
+export const AddAction = actionRef<{ text: string; owner: Todo['owner']; link?: string }, Todo>(
+  'todos',
+  'add',
+)
 /** `{ id }` → the to-do, ticked. User-only. */
 export const DoneAction = actionRef<{ id: number }, Todo>('todos', 'done')
 /** `{ id }` → the to-do, open again. User-only. */

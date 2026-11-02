@@ -4,6 +4,7 @@ import { expect, it } from 'vitest'
 import todosExtension, {
   add,
   DONE_LIMIT,
+  listText,
   mark,
   noteFor,
   Todos,
@@ -45,6 +46,14 @@ it('adds to-dos by owner and refuses empty text or an unknown owner', async () =
   await expect(add(tx, ' ', 'user')).rejects.toThrow('nonempty')
   await expect(add(tx, 'x', 'lander')).rejects.toThrow('owner')
   expect((await list(tx)).map((todo) => todo.id)).toEqual([1, 2])
+})
+
+it('keeps a to-do link where the user acts and names it in the list', async () => {
+  const { tx } = fakeTx()
+  const url = 'https://github.com/acme/my-app/pull/7'
+  expect(await add(tx, 'Merge the release', 'user', ` ${url} `)).toMatchObject({ link: url })
+  await expect(add(tx, 'x', 'user', 'javascript:alert(1)')).rejects.toThrow('http(s) URL')
+  expect(listText(await list(tx))).toContain(`Merge the release (${url})`)
 })
 
 it('ticks and reopens a to-do, keeping only the newest done ones', async () => {

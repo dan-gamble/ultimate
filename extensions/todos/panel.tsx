@@ -197,6 +197,20 @@ function TodoRow({
         >
           {todo.text}
         </span>
+        {todo.link && (
+          <a
+            aria-label={`Open ${todo.link}`}
+            className="mt-0.5 flex size-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+            data-todo-link
+            href={todo.link}
+            onClick={(event) => event.stopPropagation()}
+            rel="noreferrer"
+            target="_blank"
+            title={todo.link}
+          >
+            <ArrowUpRightIcon className="size-3.5" />
+          </a>
+        )}
         <time
           className="shrink-0 pt-px font-mono text-[11px] text-muted-foreground/70"
           dateTime={new Date(at).toISOString()}

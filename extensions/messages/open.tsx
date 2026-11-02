@@ -59,7 +59,11 @@ export function OpenMessages() {
   if (id === undefined) return null
   const { waiting, owed, delivering } = openMessages(log.messages, id, concludedSince)
   const parts = [
-    waiting.length && `${waiting.length} waiting`,
+    // "Waiting" is kept for what waits on the user; this conversation awaits others' answers.
+    waiting.length &&
+      (waiting.length === 1 && typeof waiting[0].to === 'number'
+        ? `awaiting #${waiting[0].to}`
+        : `awaiting ${waiting.length}`),
     owed.length && `${owed.length} owed`,
     delivering.length && `${delivering.length} delivering`,
   ].filter(Boolean)
@@ -86,7 +90,7 @@ export function OpenMessages() {
         className="grid w-80 gap-2.5 p-1.5 font-mono text-[11px]"
         side="top"
       >
-        <Section messages={waiting} now={now} open={go} side="to" title="Waiting on" />
+        <Section messages={waiting} now={now} open={go} side="to" title="Awaiting an answer from" />
         <Section messages={owed} now={now} open={go} side="from" title="You owe an answer to" />
         <Section messages={delivering} now={now} open={go} side="to" title="Delivering to" />
       </PopoverContent>

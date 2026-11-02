@@ -6,12 +6,12 @@ nesting: for planned work with tasks and reviews, use `plan`.
 ## State
 
 The `todos` document on conversation 1 (conversation scope, latest history, initial on fork) holds
-`{ next, items: [{ id, text, owner: 'user' | 'ultimate', at, done? }] }`, oldest first. Text is trimmed, nonempty
-and at most 300 characters. Ticking keeps the newest 50 done items and drops older ones; open items are never dropped.
+`{ next, items: [{ id, text, owner: 'user' | 'ultimate', at, link?, done? }] }`, oldest first. Text is trimmed,
+nonempty and at most 300 characters; `link`, where the user acts (the pull request to merge), is an http(s) URL. Ticking keeps the newest 50 done items and drops older ones; open items are never dropped.
 
 ## Agents
 
-`todo {action: 'add', text, owner} | {action: 'done', id} | {action: 'list'}` belongs to @ultimate: it is deferred
+`todo {action: 'add', text, owner, link?} | {action: 'done', id} | {action: 'list'}` belongs to @ultimate: it is deferred
 and named in `agents/ultimate.md`, and any other caller is refused. A coordinator that wants something on the list
 asks @ultimate.
 
@@ -32,12 +32,19 @@ then @ultimate's, an add field, and the done ones folded away. A question row op
 message (messages’ `messages:open {conversation, call}`), where its answer card has the choices, a reply and Dismiss; the
 header counts questions apart from to-dos. An open to-do's ▶ button (on hover or focus) sends @ultimate, as the
 user, `Work on to-do #<id>: <text>` (`Help me with to-do #<id>: …` for the user's own), after its current run if
-it is busy, and opens its conversation. ⌘K “Show open questions” opens this tab.
+it is busy, and opens its conversation; a to-do with a link shows ↗ to open it. ⌘K “Show open questions” opens this tab.
+
+## Waiting on you
+
+Your open questions and your open to-dos are what waits on you. The status line shows `● N waiting on you` on every
+surface while there are any, and a click opens this tab. The extension also provides the sidebar's `Waiting` point
+with your open to-dos, so @ultimate's row and mark say `N waiting on you` for them too, and clicking that row opens
+this tab beside @ultimate.
 
 ## Actions
 
 All user-only, for the panel.
 
-- `add { text, owner }` → the new to-do.
+- `add { text, owner, link? }` → the new to-do.
 - `done { id }` → the to-do, ticked.
 - `reopen { id }` → the to-do, open again.

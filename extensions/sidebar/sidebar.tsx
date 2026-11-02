@@ -47,10 +47,10 @@ import { InFlight, inFlight, MemoryRow, stillOpen, useMemorySummary } from './ro
 import type { Flight } from './root.tsx'
 import { Landed, useLandings } from './landed.tsx'
 import { MEMORY_SURFACE, useOpenMemory, useRoots } from '../lineage/ui.tsx'
-import { StandingDoc, talkToUltimate } from '../subagents/ui.tsx'
+import { StandingDoc } from '../subagents/ui.tsx'
 import type { KeptWork } from '../conversations/types.ts'
 import { LanderState } from './lander.tsx'
-import { StandingPhase, WaitingOnUser } from './ultimate.tsx'
+import { openUltimate, StandingPhase, WaitingOnUser } from './ultimate.tsx'
 import { useShell, useSidebarState } from './state.tsx'
 import { topLevelRows } from './listed.ts'
 import { UnderUltimate, Unlisted } from './ui.tsx'
@@ -358,7 +358,7 @@ function Tree({
         : (Object.entries(standingIds ?? {}).find(([, id]) => id === conversation.id)?.[0] ??
           conversation.title?.replace(/^@/, '') ??
           `#${conversation.id}`)
-    const state = conversation
+    const derived = conversation
       ? conversationState(
           {
             id: conversation.id,
@@ -370,9 +370,10 @@ function Tree({
           },
           log,
         )
-      : waiting > 0
-        ? 'waits'
-        : 'idle'
+      : 'idle'
+    // The log counts only questions; the user's to-dos (the `Waiting` point) wait on them too.
+    const state =
+      isUltimate && waiting > 0 && derived !== 'paused' && derived !== 'working' ? 'waits' : derived
     return (
       <StandingRow
         conversation={conversation}
@@ -384,7 +385,7 @@ function Tree({
         onOpen={() =>
           conversation && !isUltimate
             ? actions.switchConversation(conversation.id)
-            : void talkToUltimate(actions)
+            : void openUltimate(actions, waiting)
         }
         shown={shown}
       >
