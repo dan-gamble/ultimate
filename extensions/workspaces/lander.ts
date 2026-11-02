@@ -226,7 +226,11 @@ export async function runLanderCheck(
   } finally {
     clearTimeout(stallTimer)
     clearTimeout(totalTimer)
-    await rm(tmp, { recursive: true, force: true })
+    await rm(tmp, { recursive: true, force: true, maxRetries: 5 }).catch((error: unknown) =>
+      // A process the check left behind still writes there (ENOTEMPTY): the check's result stands, and the next
+      // host's sweep removes the directory.
+      console.error(`lander: leaving ${tmp}:`, error),
+    )
   }
 }
 

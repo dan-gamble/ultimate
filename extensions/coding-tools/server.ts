@@ -76,6 +76,8 @@ export function prepareBash(
     execution.env[`GIT_CONFIG_VALUE_${count++}`] = command
   }
   execution.env.GIT_CONFIG_COUNT = String(count)
+  // Pi's own mark for commands its agent runs, so a repository's hooks and guards treat Ultimate as an agent.
+  execution.env.PI_CODING_AGENT = 'true'
   if (log) execution.env.ULTIMATE_COMMIT_LOG = log
 }
 
