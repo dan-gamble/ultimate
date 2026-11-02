@@ -6,6 +6,7 @@ import { afterEach, expect, it } from 'vitest'
 import type { ConversationId } from '@earendil-works/pi-durable'
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context'
 import {
+  actions,
   linkHome,
   previewEnv,
   previewWorkspace,
@@ -199,4 +200,29 @@ it('labels a preview chip with the URL it opens when its text is that link', () 
     ),
   ).toBe('https://rog.tail3a3a66.ts.net:46335/?conversation=3')
   expect(label('the preview', 'http://127.0.0.1:46335/', tailnet)).toBe('the preview')
+})
+
+it('lists the other projects whose server runs, for the switcher', async () => {
+  const host = {
+    projects: async () => [
+      {
+        name: 'self',
+        home: '/h/self',
+        current: true,
+        running: { pid: 1, url: 'http://127.0.0.1:4747' },
+        conversations: [],
+      },
+      {
+        name: 'harness',
+        home: '/h/harness',
+        current: false,
+        running: { pid: 2, url: 'http://127.0.0.1:4748' },
+        conversations: [],
+      },
+      { name: 'idle', home: '/h/idle', current: false, conversations: [] },
+    ],
+  }
+  expect(await actions.projects(null, { host } as never)).toEqual([
+    { id: '/h/harness', name: 'harness', url: 'http://127.0.0.1:4748' },
+  ])
 })
