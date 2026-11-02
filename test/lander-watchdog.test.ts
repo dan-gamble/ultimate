@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { withAbortSignal } from '@earendil-works/chord/context'
@@ -172,4 +172,22 @@ it('gives each check its own TMPDIR in the given directory and removes it afterw
   await run('.', 'pnpm test', context, tmpdir(), temp)
   expect(seen && dirname(seen)).toBe(temp)
   expect(await readdir(temp)).toEqual([])
+})
+
+it('keeps the result of a check whose TMPDIR cannot be removed', async () => {
+  // A test's leftover process kept writing to the check's TMPDIR, and its ENOTEMPTY failed whole landings.
+  const temp = await mkdtemp(join(tmpdir(), 'lander-tmp-'))
+  vi.spyOn(console, 'error').mockImplementation(() => {})
+  vi.mocked(runGroup).mockImplementation(async (_program, _args, options) => {
+    await writeFile(join(options.env!.TMPDIR!, 'left'), '')
+    await chmod(temp, 0o555)
+    options.onOutput('done\n')
+    return 0
+  })
+  try {
+    expect(await run('.', 'pnpm test', context, tmpdir(), temp)).toEqual({ summary: 'done' })
+  } finally {
+    await chmod(temp, 0o755)
+    await rm(temp, { recursive: true })
+  }
 })
