@@ -32,7 +32,7 @@ import { implementAction } from '../../lib/actions.ts'
 import { spawnGroup, stopGroup } from '../../lib/process-group.ts'
 import type { Group, GroupProcess } from '../../lib/process-group.ts'
 import { Previews } from '../conversations/api.ts'
-import { ListAction } from './refs.ts'
+import { ListAction, ProjectsAction } from './refs.ts'
 import type { JsonObject } from '@earendil-works/pi-durable'
 import { readSettings, userSettingsPath } from '../../lib/settings.ts'
 import { readFamilies } from '../../lib/families-settings.ts'
@@ -303,6 +303,14 @@ export const actions: Record<string, ExtensionAction> = {
         .map((item) => ({ ...item, running: false })),
     ]
   }),
+  /** The other projects whose server runs now, for the title bar's switcher. */
+  projects: implementAction(ProjectsAction, async (_args, { host }) =>
+    (await host.projects()).flatMap((project) =>
+      !project.current && project.running
+        ? [{ id: project.home, name: project.name, url: project.running.url }]
+        : [],
+    ),
+  ),
 }
 
 /**

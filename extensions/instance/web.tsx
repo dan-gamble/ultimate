@@ -24,8 +24,8 @@ import {
 } from '@/sdk'
 import type { ToolCallView } from '@/sdk'
 import { at, label } from './links.ts'
-import { ListAction } from './refs.ts'
-import type { Preview } from './refs.ts'
+import { ListAction, ProjectsAction } from './refs.ts'
+import type { Preview, Project } from './refs.ts'
 
 interface Instance {
   id: string
@@ -158,12 +158,16 @@ const isLoopback = (hostname: string) =>
 /** Previews bind to loopback, so a page opened from elsewhere, such as the tailnet, cannot frame them. */
 const loopback = isLoopback(location.hostname)
 
+/** A preview or another project shown below the title bar, at a URL of it; `chip` names it in the title bar. */
+type Shown = { id: string; url: string; chip: string; title: string }
+
 /**
- * In memory: the previews `list` returned last, which `Poll` asks for, and the preview shown below the title bar at
- * a URL of it. A reload returns to this project.
+ * In memory: the previews `list` and the other running projects `projects` returned last, which `Poll` asks for, and
+ * what is shown below the title bar. A reload returns to this project.
  */
 let previews: Preview[] | undefined
-let shown: { preview: Preview; url: string } | undefined
+let projects: Project[] | undefined
+let shown: Shown | undefined
 let refetch = () => {}
 const listeners = new Set<() => void>()
 const changed = () => {
@@ -173,31 +177,49 @@ const subscribe = (listener: () => void) => {
   listeners.add(listener)
   return () => listeners.delete(listener)
 }
-function show(preview: Preview | undefined, url = preview?.url) {
-  shown = preview && url ? { preview, url } : undefined
+function show(next: Shown | undefined) {
+  shown = next
   changed()
 }
+const port = (url: string) => `:${new URL(url).port}`
+const previewShown = (preview: Preview, url = preview.url): Shown => ({
+  id: preview.id,
+  url,
+  chip: `#${preview.conversationId} · ${port(preview.url)}`,
+  title: `Preview #${preview.conversationId}`,
+})
+const projectShown = (project: Project): Shown => ({
+  id: project.id,
+  url: project.url,
+  chip: project.name,
+  title: project.name,
+})
 const useShown = () => useSyncExternalStore(subscribe, () => shown)
 const usePreviews = () => useSyncExternalStore(subscribe, () => previews)
+const useProjects = () => useSyncExternalStore(subscribe, () => projects)
 
-/** Asks for the previews every 5 s, for the switcher and preview links; showing one that stopped returns. */
+/**
+ * Asks for the previews and the other running projects every 5 s, for the switcher and preview links; showing one that
+ * stopped returns.
+ */
 function Poll() {
-  const { data, refetch: again } = useAction(ListAction, null, {
-    // A failed poll leaves the last list; the next one tries again.
-    onError: () => {},
-  })
+  // A failed poll leaves the last list; the next one tries again.
+  const list = useAction(ListAction, null, { onError: () => {} })
+  const others = useAction(ProjectsAction, null, { enabled: loopback, onError: () => {} })
+  const again = list.refetch
+  const againOthers = others.refetch
   useEffect(() => {
-    refetch = () => void again()
+    refetch = () => void Promise.all([again(), loopback && againOthers()])
     const timer = setInterval(refetch, 5000)
     return () => clearInterval(timer)
-  }, [again])
+  }, [again, againOthers])
   useEffect(() => {
-    if (!data) return
-    previews = data
-    if (shown && !data.some((preview) => preview.running && preview.id === shown?.preview.id))
-      shown = undefined
+    if (list.data) previews = list.data
+    if (others.data) projects = others.data
+    const live = [...(previews ?? []).filter((preview) => preview.running), ...(projects ?? [])]
+    if (shown && !live.some((item) => item.id === shown?.id)) shown = undefined
     changed()
-  }, [data])
+  }, [list.data, others.data])
   return null
 }
 
@@ -233,7 +255,7 @@ function usePreviewTarget(href: string, own = false): Target | undefined {
     href: frame,
     open: (event) => {
       event.preventDefault()
-      show(live, frame)
+      show(previewShown(live, frame))
     },
   }
 }
@@ -281,17 +303,18 @@ function PreviewLink({
   )
 }
 
-const port = (url: string) => `:${new URL(url).port}`
+const count = (n: number, noun: string) => (n ? [`${n} ${noun}${n === 1 ? '' : 's'}`] : [])
 
 /**
- * The title bar's project chip with the previews `instance` runs as its menu: "This project" and each preview. A plain
- * chip while there are none; the list refreshes when the menu opens.
+ * The title bar's project chip as a menu of "This project", the other projects running on this machine and the previews
+ * `instance` runs. A plain chip while there are none; the lists refresh when the menu opens.
  */
 function Switcher() {
-  const current = useShown()?.preview
-  const data = usePreviews()?.filter((preview) => preview.running)
+  const current = useShown()
+  const data = usePreviews()?.filter((preview) => preview.running) ?? []
+  const others = useProjects() ?? []
   const conversations = useConversations()
-  if (!data?.length) return <ProjectChip />
+  if (!data.length && !others.length) return <ProjectChip />
   const title = (preview: Preview) =>
     conversations.find((conversation) => conversation.id === preview.conversationId)?.title
   return (
@@ -300,12 +323,12 @@ function Switcher() {
         <ProjectChip className={cn(current && 'bg-brand/10')} menu>
           {current ? (
             <span className="flex shrink-0 items-center gap-1.5 font-mono text-[11.5px] text-muted-foreground">
-              <span className="size-1.5 rounded-full bg-brand" />#{current.conversationId} ·{' '}
-              {port(current.url)}
+              <span className="size-1.5 rounded-full bg-brand" />
+              {current.chip}
             </span>
           ) : (
             <span className="shrink-0 font-mono text-[11.5px] text-muted-foreground max-md:hidden">
-              {data.length} {data.length === 1 ? 'preview' : 'previews'}
+              {[...count(others.length, 'project'), ...count(data.length, 'preview')].join(' · ')}
             </span>
           )}
         </ProjectChip>
@@ -316,12 +339,32 @@ function Switcher() {
           <span className={cn('flex-1 text-[13px]', !current && 'text-brand')}>This project</span>
           <span className="font-mono text-[11px] text-muted-foreground">{port(location.href)}</span>
         </DropdownMenuItem>
+        {others.map((project) => (
+          <DropdownMenuItem
+            className="gap-2 py-1.5"
+            data-project={project.id}
+            key={project.id}
+            onSelect={() => show(projectShown(project))}
+          >
+            <span
+              className={cn(
+                'min-w-0 flex-1 truncate text-[13px]',
+                current?.id === project.id && 'text-brand',
+              )}
+            >
+              {project.name}
+            </span>
+            <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
+              {port(project.url)}
+            </span>
+          </DropdownMenuItem>
+        ))}
         {data.map((preview) => (
           <DropdownMenuItem
             className="gap-2 py-1.5"
             data-instance={preview.id}
             key={preview.id}
-            onSelect={() => show(preview)}
+            onSelect={() => show(previewShown(preview))}
           >
             <span
               className={cn(
@@ -343,24 +386,23 @@ function Switcher() {
 }
 
 /**
- * The shown preview's whole UI, below the title bar and above the surfaces. Showing another surface of this project
- * returns to it.
+ * The shown preview's or project's whole UI, below the title bar and above the surfaces. Showing another surface of
+ * this project returns to it.
  */
 function Embedded() {
   const current = useShown()
   const surface = useStore((state) => state.ui.surface?.id)
   useEffect(() => () => show(undefined), [surface])
   if (!current) return null
-  const { preview, url } = current
   return (
     <div className="fixed inset-x-0 top-9 bottom-0 z-40 bg-background">
       {/* oxlint-disable-next-line react/iframe-missing-sandbox -- a whole Ultimate on its own origin, trusted as in its own tab */}
       <iframe
         allow="clipboard-read; clipboard-write"
         className="size-full border-0"
-        key={preview.id}
-        src={url}
-        title={`Preview #${preview.conversationId}`}
+        key={current.id}
+        src={current.url}
+        title={current.title}
       />
     </div>
   )
