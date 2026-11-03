@@ -101,7 +101,8 @@ it('connects configured servers, lists and calls their tools, and isolates a fai
   await until(() => status().every((server) => server.state !== 'connecting'))
   expect(status()).toMatchObject([
     { name: 'echo', state: 'connected', tools: 1 },
-    { name: 'locked', state: 'failed' },
+    // Without an Authorization header, an HTTP server that answers 401 waits for an OAuth sign-in.
+    { name: 'locked', state: 'signin', oauth: { signedIn: false } },
     { name: 'broken', state: 'failed', error: 'Invalid entry: needs a command or a url' },
   ])
   const run = (args: unknown) =>
@@ -115,7 +116,7 @@ it('connects configured servers, lists and calls their tools, and isolates a fai
   expect(await run({ server: 'echo', tool: 'echo', args: {} })).toMatchObject({ isError: true })
   expect(await run({ server: 'locked', tool: 'echo' })).toMatchObject({
     isError: true,
-    output: [{ text: expect.stringContaining('MCP server locked is failed') }],
+    output: [{ text: expect.stringContaining('MCP server locked is signin') }],
   })
 })
 

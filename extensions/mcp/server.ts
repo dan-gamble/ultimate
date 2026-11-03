@@ -2,13 +2,17 @@
  * MCP: connects the servers in `mcpServers` (user settings, and the project's once its setup is trusted) and offers
  * their tools through one `mcp` tool, so the prompt stays the same however many tools the servers have.
  */
-import { basename } from 'node:path'
+import { watch } from 'node:fs'
+import type { FSWatcher } from 'node:fs'
+import { mkdir } from 'node:fs/promises'
+import { basename, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { map, obj, opt, str, unknown } from '@earendil-works/pi-schema'
 import { defineExtension, defineTool } from '@earendil-works/pi-durable'
 import type { JsonObject } from '@earendil-works/pi-durable'
 import {
   McpAbortError,
+  McpAuthRequiredError,
   McpClient,
   McpError,
   McpTimeoutError,
@@ -17,16 +21,28 @@ import {
   toLlmContent,
 } from '@earendil-works/pi-mcp'
 import type { Tool } from '@earendil-works/pi-mcp'
+import { McpOAuthAuthorizationRequiredError } from '@earendil-works/pi-mcp/oauth'
+import type { OAuthChallenge } from '@earendil-works/pi-mcp/oauth'
 import { implementAction } from '../../lib/actions.ts'
 import { readSecret } from '../../lib/secrets.ts'
 import { readSettings, userSettingsPath } from '../../lib/settings.ts'
 import type { ExtensionAction } from '../../server/actions.ts'
 import type { ExtensionHost } from '../../server/extensions.ts'
-import { ReconnectAction, StatusAction } from './refs.ts'
+import { authFile, authProvider, serverStore, signIn, SignInCancelled } from './oauth.ts'
+import type { McpAuthProvider, OAuthSettings } from './oauth.ts'
+import {
+  CancelSignInAction,
+  PasteAction,
+  ReconnectAction,
+  SignInAction,
+  SignOutAction,
+  StatusAction,
+} from './refs.ts'
 import type { McpServerStatus } from './refs.ts'
 
 export const reloadOnSettings = true
 export const pollActions = ['status']
+export const userActions = ['signIn', 'paste', 'cancelSignIn', 'signOut']
 
 /** A tool call may run long; progress notifications from the server renew it. */
 const CALL_TIMEOUT = 10 * 60_000
@@ -36,9 +52,19 @@ const LAST_RETRY = 5 * 60_000
 /** One `mcpServers` entry, as Claude Desktop and Cursor write it. */
 type Entry =
   | { command: string; args: string[]; env: Record<string, string>; cwd?: string }
-  | { url: string; headers: Record<string, string> }
+  | { url: string; headers: Record<string, string>; oauth: Oauth }
 
-type Server = Omit<McpServerStatus, 'tools'> & {
+/** The `oauth` settings of an HTTP entry; `clientSecret` may name a secret with `${NAME}`. */
+type Oauth = Omit<OAuthSettings, 'clientSecret'> & { clientSecret?: string }
+
+/** A sign-in running in this process. */
+type SigningIn = {
+  url?: string
+  controller: AbortController
+  paste(url: string): void
+}
+
+type Server = Omit<McpServerStatus, 'tools' | 'oauth'> & {
   entry?: Entry
   client?: McpClient
   tools: Tool[]
@@ -48,6 +74,11 @@ type Server = Omit<McpServerStatus, 'tools'> & {
   connecting?: Promise<void>
   /** The secret values its config resolved, kept out of every error it shows. */
   secrets: string[]
+  /** OAuth servers: whether credentials are stored, the provider its connections share, and the running sign-in. */
+  signedIn?: boolean
+  auth?: McpAuthProvider
+  challenge?: OAuthChallenge
+  signingIn?: SigningIn
 }
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
@@ -65,7 +96,20 @@ function entryOf(value: unknown): Entry | string {
       return 'the legacy SSE transport is not supported; use Streamable HTTP'
     if (value.headers !== undefined && !record(value.headers))
       return 'headers must map names to strings'
-    return { url: value.url, headers: (value.headers as Record<string, string>) ?? {} }
+    const oauth = value.oauth ?? {}
+    if (!isObject(oauth)) return 'oauth must be an object'
+    for (const key of ['clientId', 'clientSecret', 'callbackUrl', 'scope'])
+      if (oauth[key] !== undefined && typeof oauth[key] !== 'string')
+        return `oauth.${key} must be a string`
+    if (oauth.callbackPort !== undefined && !Number.isInteger(oauth.callbackPort))
+      return 'oauth.callbackPort must be a port number'
+    if (typeof oauth.callbackUrl === 'string' && !URL.canParse(oauth.callbackUrl))
+      return 'oauth.callbackUrl must be a URL'
+    return {
+      url: value.url,
+      headers: (value.headers as Record<string, string>) ?? {},
+      oauth: oauth,
+    }
   }
   if (typeof value.command !== 'string') return 'needs a command or a url'
   if (value.args !== undefined && !strings(value.args)) return 'args must be a list of strings'
@@ -83,9 +127,19 @@ const SECRET = /\$\{([A-Z][A-Z0-9_]*)\}/g
 /** The secrets an entry names with `${NAME}`, in its url, headers, command args and env. */
 const placeholders = (entry: Entry) =>
   ('url' in entry
-    ? [entry.url, ...Object.values(entry.headers)]
+    ? [entry.url, ...Object.values(entry.headers), entry.oauth.clientSecret ?? '']
     : [...entry.args, ...Object.values(entry.env)]
   ).flatMap((value) => [...value.matchAll(SECRET)].map(([, name]) => name))
+
+/** The server wants a (new) sign-in: no stored token works, a refresh failed, or it asks for more scope. */
+const authRequired = (error: unknown) =>
+  error instanceof McpOAuthAuthorizationRequiredError || error instanceof McpAuthRequiredError
+
+/** HTTP servers sign in with OAuth unless their headers carry an `Authorization`. */
+const usesOAuth = (entry: Entry | undefined): entry is Extract<Entry, { url: string }> =>
+  !!entry &&
+  'url' in entry &&
+  !Object.keys(entry.headers).some((name) => name.toLowerCase() === 'authorization')
 
 class MissingSecret extends Error {
   secret: string
@@ -173,18 +227,51 @@ const listing = (server: Server) =>
   ].join('\n')
 const failure = (text: string) => ({ output: [{ type: 'text' as const, text }], isError: true })
 
-const views = new WeakMap<
-  ExtensionHost,
-  { status(): McpServerStatus[]; reconnect(name: string): Promise<void> }
->()
+type View = {
+  status(): McpServerStatus[]
+  reconnect(name: string): Promise<void>
+  signIn(name: string): Promise<void>
+  paste(name: string, url: string): void
+  cancelSignIn(name: string): void
+  signOut(name: string): Promise<void>
+}
+const views = new WeakMap<ExtensionHost, View>()
+
+/** The view of `host` and the `name` argument, which every action but status takes. */
+function named(action: string, args: unknown, host: ExtensionHost) {
+  const view = views.get(host)
+  const name = isObject(args) ? args.name : undefined
+  if (!view || typeof name !== 'string') throw new Error(`${action}: name is required`)
+  return { view, name }
+}
 
 export const actions: Record<string, ExtensionAction> = {
   status: implementAction(StatusAction, (_args, { host }) => views.get(host)?.status() ?? []),
   reconnect: implementAction(ReconnectAction, async (args, { host }) => {
-    const view = views.get(host)
-    const name = isObject(args) ? args.name : undefined
-    if (!view || typeof name !== 'string') throw new Error('reconnect: name is required')
+    const { view, name } = named('reconnect', args, host)
     await view.reconnect(name)
+    return view.status()
+  }),
+  signIn: implementAction(SignInAction, async (args, { host }) => {
+    const { view, name } = named('signIn', args, host)
+    await view.signIn(name)
+    return view.status()
+  }),
+  paste: implementAction(PasteAction, (args, { host }) => {
+    const { view, name } = named('paste', args, host)
+    const url = isObject(args) ? args.url : undefined
+    if (typeof url !== 'string' || !url.trim()) throw new Error('paste: url is required')
+    view.paste(name, url)
+    return null
+  }),
+  cancelSignIn: implementAction(CancelSignInAction, (args, { host }) => {
+    const { view, name } = named('cancelSignIn', args, host)
+    view.cancelSignIn(name)
+    return null
+  }),
+  signOut: implementAction(SignOutAction, async (args, { host }) => {
+    const { view, name } = named('signOut', args, host)
+    await view.signOut(name)
     return view.status()
   }),
 }
@@ -201,6 +288,32 @@ export default async function mcp(host: ExtensionHost) {
     server.retryAt = Date.now() + delay
     server.timer = setTimeout(() => void begin(server), delay)
     server.timer.unref?.()
+  }
+
+  /** Waits for the user: no retry, since only a sign-in (here or in another process) changes the answer. */
+  function needsSignIn(server: Server) {
+    server.client = undefined
+    server.state = 'signin'
+    server.signedIn = false
+  }
+
+  /** An OAuth server's credentials in the shared file, keyed by its URL with its secrets resolved. */
+  const storeOf = async (server: Server) =>
+    serverStore(
+      host.userHome,
+      server.name,
+      await expand(host.userHome, (server.entry as { url: string }).url, []),
+    )
+
+  /** Its `oauth` settings with the client secret read now, so a missing one fails only what needs it. */
+  async function settingsOf(server: Server): Promise<OAuthSettings> {
+    const { clientSecret, ...oauth } = (server.entry as { oauth: Oauth }).oauth
+    return {
+      ...oauth,
+      ...(clientSecret
+        ? { clientSecret: await expand(host.userHome, clientSecret, server.secrets) }
+        : {}),
+    }
   }
 
   async function connect(server: Server) {
@@ -225,11 +338,25 @@ export default async function mcp(host: ExtensionHost) {
     })
     let stdio: StdioTransport | undefined
     try {
+      const url = 'url' in entry ? await expand(host.userHome, entry.url, found) : ''
+      if (usesOAuth(entry)) {
+        const store = await storeOf(server)
+        server.signedIn = !!(await store.load())?.tokens
+        server.auth ??= authProvider({
+          serverUrl: url,
+          store,
+          settings: () => settingsOf(server),
+          onChallenge: (challenge) => {
+            server.challenge = challenge
+          },
+        })
+      }
       const transport =
         'url' in entry
           ? new StreamableHttpTransport({
-              url: await expand(host.userHome, entry.url, found),
+              url,
               headers: await expandAll(host.userHome, entry.headers, found),
+              authProvider: server.auth,
             })
           : (stdio = new StdioTransport({
               command: entry.command,
@@ -256,6 +383,11 @@ export default async function mcp(host: ExtensionHost) {
       server.attempts = 0
     } catch (error) {
       if (closed || server.client !== client) return
+      if (server.auth && authRequired(error)) {
+        needsSignIn(server)
+        await close(client)
+        return
+      }
       if (error instanceof MissingSecret) server.missing = error.secret
       const stderr = stdio?.stderr.trim().split('\n').at(-1)
       fail(
@@ -304,6 +436,17 @@ export default async function mcp(host: ExtensionHost) {
     })
   }
 
+  function find(name: string) {
+    const server = servers.get(name)
+    if (!server) throw new Error(`No MCP server named ${name}`)
+    return server
+  }
+  function oauthServer(name: string) {
+    const server = find(name)
+    if (!usesOAuth(server.entry)) throw new Error(`MCP server ${name} does not sign in with OAuth`)
+    return server
+  }
+
   views.set(host, {
     status: () =>
       [...servers.values()].map((server) => ({
@@ -315,13 +458,113 @@ export default async function mcp(host: ExtensionHost) {
         ...(server.error ? { error: server.error } : {}),
         ...(server.missing ? { missing: server.missing } : {}),
         ...(server.retryAt ? { retryAt: server.retryAt } : {}),
+        ...(usesOAuth(server.entry)
+          ? {
+              oauth: {
+                signedIn: server.signedIn ?? false,
+                ...(server.signingIn
+                  ? { signingIn: server.signingIn.url ? { url: server.signingIn.url } : {} }
+                  : {}),
+              },
+            }
+          : {}),
       })),
     async reconnect(name) {
-      const server = servers.get(name)
-      if (!server) throw new Error(`No MCP server named ${name}`)
+      await restart(find(name))
+    },
+    async signIn(name) {
+      const server = oauthServer(name)
+      if (closed || server.signingIn) return
+      // A missing secret fails the action, before anything runs.
+      const store = await storeOf(server)
+      const settings = await settingsOf(server)
+      const serverUrl = await expand(host.userHome, (server.entry as { url: string }).url, [])
+      if (server.signingIn) return
+      let paste!: (url: string) => void
+      const pasted = new Promise<string>((resolve) => (paste = resolve))
+      const run: SigningIn = { controller: new AbortController(), paste }
+      server.signingIn = run
+      delete server.error
+      let shown!: () => void
+      const ready = new Promise<void>((resolve) => (shown = resolve))
+      // The flow reports into the server's state; the action waits only for its authorization page.
+      // oxlint-disable-next-line typescript/no-floating-promises -- see above.
+      signIn({
+        serverUrl,
+        store,
+        settings,
+        challenge: server.challenge,
+        show: (url) => {
+          run.url = url.href
+          shown()
+        },
+        pasted,
+        signal: run.controller.signal,
+      })
+        .then(
+          async () => {
+            delete server.challenge
+            if (server.signingIn === run) delete server.signingIn
+            await restart(server)
+          },
+          (error: unknown) => {
+            if (server.signingIn === run) delete server.signingIn
+            if (!(error instanceof SignInCancelled))
+              server.error = `Sign-in failed: ${redact(server, error)}`
+          },
+        )
+        .finally(shown)
+      await ready
+    },
+    paste(name, url) {
+      const run = oauthServer(name).signingIn
+      if (!run) throw new Error(`No sign-in to ${name} is running`)
+      run.paste(url)
+    },
+    cancelSignIn(name) {
+      oauthServer(name).signingIn?.controller.abort()
+    },
+    async signOut(name) {
+      const server = oauthServer(name)
+      server.signingIn?.controller.abort()
+      await (await storeOf(server)).remove()
+      server.signedIn = false
       await restart(server)
     },
   })
+
+  // A sign-in or sign-out in another Ultimate process (another project) reaches this one through the shared file.
+  const oauth = [...servers.values()].filter((server) => usesOAuth(server.entry))
+  let watcher: FSWatcher | undefined
+  let settle: ReturnType<typeof setTimeout> | undefined
+  const recheck = async () => {
+    for (const server of oauth) {
+      if (closed || server.connecting || server.signingIn) continue
+      const signedIn = !!(await (await storeOf(server)).load())?.tokens
+      if (signedIn === server.signedIn) continue
+      server.signedIn = signedIn
+      if (signedIn ? server.state === 'signin' : server.state === 'connected')
+        // restart never rejects; the server's state shows how it went.
+        // oxlint-disable-next-line typescript/no-floating-promises -- see above.
+        void restart(server)
+    }
+  }
+  if (oauth.length) {
+    await mkdir(join(host.userHome, '.ultimate'), { recursive: true })
+    const file = basename(authFile(host.userHome))
+    watcher = watch(join(host.userHome, '.ultimate'), (_event, changed) => {
+      if (changed !== file) return
+      clearTimeout(settle)
+      settle = setTimeout(
+        () =>
+          void recheck().catch((error: unknown) =>
+            // The next change or reconnect reads the file again.
+            console.warn('MCP sign-in check', error instanceof Error ? error.message : error),
+          ),
+        200,
+      )
+    })
+  }
 
   let started = false
   host.onOpen(async () => {
@@ -333,7 +576,16 @@ export default async function mcp(host: ExtensionHost) {
   })
   host.onClose(async () => {
     closed = true
-    for (const server of servers.values()) clearTimeout(server.timer)
+    watcher?.close()
+    clearTimeout(settle)
+    for (const server of servers.values()) {
+      clearTimeout(server.timer)
+      server.signingIn?.controller.abort()
+    }
+    // A refresh in flight may have rotated the refresh token; its answer is saved before the clients close.
+    await Promise.all(
+      [...servers.values()].map((server) => server.auth?.settled() ?? Promise.resolve()),
+    )
     await Promise.all([...servers.values()].map((server) => close(server.client)))
   })
 

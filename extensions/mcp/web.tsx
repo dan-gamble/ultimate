@@ -1,5 +1,14 @@
-import { LoaderCircleIcon, PlugIcon, RefreshCwIcon } from 'lucide-react'
+import {
+  CheckIcon,
+  CopyIcon,
+  ExternalLinkIcon,
+  LoaderCircleIcon,
+  LogOutIcon,
+  PlugIcon,
+  RefreshCwIcon,
+} from 'lucide-react'
 import { useEffect, useState } from 'react'
+import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import {
   api,
@@ -9,11 +18,19 @@ import {
   events,
   provide,
   useAction,
+  useCopy,
   useEvent,
   useNow,
 } from '@/sdk'
 import { ExtensionDetails } from '../onboarding/ui.tsx'
-import { ReconnectAction, StatusAction } from './refs.ts'
+import {
+  CancelSignInAction,
+  PasteAction,
+  ReconnectAction,
+  SignInAction,
+  SignOutAction,
+  StatusAction,
+} from './refs.ts'
 import type { McpServerStatus } from './refs.ts'
 
 /**
@@ -22,7 +39,8 @@ import type { McpServerStatus } from './refs.ts'
  */
 function useServers(enabled = true) {
   const status = useAction(StatusAction, null, { enabled, onError: () => {} })
-  const settling = status.data?.some((server) => server.state === 'connecting') ?? false
+  const settling =
+    status.data?.some((server) => server.state === 'connecting' || server.oauth?.signingIn) ?? false
   const now = useNow(settling ? 2_000 : 60_000)
   const retry = Math.min(...(status.data ?? []).map((server) => server.retryAt ?? Infinity))
   const { refetch } = status
@@ -43,17 +61,100 @@ const tone: Record<McpServerStatus['state'], string> = {
   connected: 'bg-success',
   connecting: 'bg-muted-foreground/50',
   failed: 'bg-error',
+  signin: 'bg-warning',
+}
+
+const smallButton = 'h-6 gap-1.5 px-2 font-mono text-[11px]'
+
+/**
+ * A running sign-in: its authorization page to open, and a field for the URL the browser ends on, for a browser on
+ * another machine that cannot reach this one's callback.
+ */
+function SigningIn({ name, url, onChanged }: { name: string; url: string; onChanged: () => void }) {
+  const { copied, copy } = useCopy()
+  const [value, setValue] = useState('')
+  const [sending, setSending] = useState(false)
+  const [error, setError] = useState<string>()
+  const submit = () => {
+    if (!value.trim() || sending) return
+    setSending(true)
+    setError(undefined)
+    api.action(PasteAction, { name, url: value.trim() }).then(onChanged, (failure: unknown) => {
+      setSending(false)
+      setError(errorMessage(failure))
+    })
+  }
+  return (
+    <div className="mt-1.5 ml-3.5 flex flex-col gap-1.5" data-mcp-signin={name}>
+      <div className="flex gap-1.5">
+        <Button asChild className={smallButton} size="sm">
+          <a href={url} rel="noreferrer" target="_blank">
+            <ExternalLinkIcon className="size-3" />
+            Open sign-in page
+          </a>
+        </Button>
+        <Button className={smallButton} onClick={() => copy(url)} size="sm" variant="outline">
+          {copied ? <CheckIcon className="size-3 text-success" /> : <CopyIcon className="size-3" />}
+          {copied ? 'Copied' : 'Copy URL'}
+        </Button>
+        <Button
+          className={cn(smallButton, 'ml-auto text-muted-foreground')}
+          onClick={() =>
+            void api
+              .action(CancelSignInAction, { name })
+              .catch(() => {
+                // The sign-in may have just ended; the refreshed row shows what happened.
+              })
+              .then(onChanged)
+          }
+          size="sm"
+          variant="ghost"
+        >
+          Cancel
+        </Button>
+      </div>
+      <p className="font-sans text-[11px] leading-snug text-muted-foreground">
+        Page didn't load after approving? Paste its address:
+      </p>
+      <div className="flex gap-1.5">
+        <input
+          autoComplete="off"
+          className="h-6 min-w-0 flex-1 rounded-sm border border-input bg-transparent px-1.5 text-[11px] outline-none placeholder:text-muted-foreground/60 focus-visible:border-ring"
+          data-1p-ignore
+          data-lpignore="true"
+          onChange={(event) => setValue(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key !== 'Enter' || event.nativeEvent.isComposing) return
+            event.preventDefault()
+            submit()
+          }}
+          placeholder="http://127.0.0.1:…/callback?code=…"
+          spellCheck={false}
+          value={value}
+        />
+        <Button
+          className={smallButton}
+          disabled={!value.trim() || sending}
+          onClick={submit}
+          size="sm"
+        >
+          {sending ? <LoaderCircleIcon className="size-3 animate-spin" /> : 'Continue'}
+        </Button>
+      </div>
+      {error && <p className="text-[11px] text-error/85">{error}</p>}
+    </div>
+  )
 }
 
 function Row({ server, onChanged }: { server: McpServerStatus; onChanged: () => void }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string>()
   const now = useNow(1_000, server.retryAt !== undefined)
-  const reconnect = async () => {
+  const run = async (action: typeof ReconnectAction) => {
     setBusy(true)
     setError(undefined)
     try {
-      await api.action(ReconnectAction, { name: server.name })
+      await api.action(action, { name: server.name })
     } catch (failure) {
       setError(errorMessage(failure))
     } finally {
@@ -61,6 +162,8 @@ function Row({ server, onChanged }: { server: McpServerStatus; onChanged: () => 
       onChanged()
     }
   }
+  const reconnect = () => run(ReconnectAction)
+  const signingIn = server.oauth?.signingIn
   // Its missing secret, once saved in the Secrets panel, connects it again at once instead of at the next retry.
   useEvent('secrets:changed', (data) => {
     if (server.missing && (data as { name?: unknown } | undefined)?.name === server.missing)
@@ -80,8 +183,24 @@ function Row({ server, onChanged }: { server: McpServerStatus; onChanged: () => 
         <span className="ml-auto shrink-0 text-[11px] text-muted-foreground">
           {server.state === 'connected'
             ? `${server.tools} ${server.tools === 1 ? 'tool' : 'tools'}`
-            : server.state}
+            : signingIn
+              ? 'signing in'
+              : server.state === 'signin'
+                ? 'needs sign-in'
+                : server.state}
         </span>
+        {server.oauth?.signedIn && !signingIn && (
+          <button
+            aria-label={`Sign out of ${server.name}`}
+            className="rounded-sm p-0.5 text-muted-foreground/70 transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
+            disabled={busy}
+            onClick={() => void run(SignOutAction)}
+            title="Sign out"
+            type="button"
+          >
+            <LogOutIcon className="size-3" />
+          </button>
+        )}
         <button
           aria-label={`Reconnect ${server.name}`}
           className="-mr-1 rounded-sm p-0.5 text-muted-foreground/70 transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
@@ -105,6 +224,17 @@ function Row({ server, onChanged }: { server: McpServerStatus; onChanged: () => 
           )}
         </p>
       )}
+      {server.oauth && !signingIn && server.state === 'signin' && (
+        <button
+          className="mt-1 ml-3.5 rounded-sm border border-border px-1.5 py-0.5 text-[11px] text-foreground/90 transition-colors hover:bg-accent disabled:opacity-50"
+          disabled={busy}
+          onClick={() => void run(SignInAction)}
+          type="button"
+        >
+          {busy ? 'Starting…' : 'Sign in'}
+        </button>
+      )}
+      {signingIn?.url && <SigningIn name={server.name} onChanged={onChanged} url={signingIn.url} />}
       {server.missing && (
         <button
           className="mt-1 ml-3.5 rounded-sm border border-border px-1.5 py-0.5 text-[11px] text-foreground/90 transition-colors hover:bg-accent"
@@ -137,6 +267,7 @@ function Chip() {
   if (!servers?.length) return null
   const connected = servers.filter((server) => server.state === 'connected').length
   const failed = servers.some((server) => server.state === 'failed')
+  const signin = servers.some((server) => server.state === 'signin')
   const refresh = () => void refetch()
   return (
     <Popover>
@@ -145,9 +276,17 @@ function Chip() {
           aria-label="MCP servers"
           className={cn(
             '-mx-1 flex cursor-pointer items-center gap-1.5 rounded-sm px-1 transition-colors hover:bg-accent hover:text-foreground data-[state=open]:bg-accent data-[state=open]:text-foreground',
-            failed && 'text-error',
+            failed ? 'text-error' : signin && 'text-warning',
           )}
-          data-mcp={failed ? 'failed' : connected === servers.length ? 'connected' : 'connecting'}
+          data-mcp={
+            failed
+              ? 'failed'
+              : signin
+                ? 'signin'
+                : connected === servers.length
+                  ? 'connected'
+                  : 'connecting'
+          }
           type="button"
         >
           <PlugIcon className="size-3" />

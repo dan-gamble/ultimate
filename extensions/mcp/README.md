@@ -26,7 +26,35 @@ Connects the MCP servers in `mcpServers` and lets agents use their tools through
 - **Precedence:** user and project servers merge by name; a project entry replaces a user entry of the same name. Project servers run commands, so they load only once the project's setup is trusted (`host.projectSettings()` is empty before).
 - `"disabled": true` leaves a server out.
 
-Saving either settings file reconnects every server. OAuth is not supported yet: a server behind OAuth needs a token or service credentials in headers.
+Saving either settings file reconnects every server.
+
+## OAuth
+
+An HTTP server without an `Authorization` header signs in with OAuth when it answers 401. It shows **needs sign-in** in the popover and never opens a browser by itself. **Sign in** starts the authorization code flow (PKCE, with dynamic client registration unless a client is configured) and shows the authorization page to open. The browser returns to a callback on `127.0.0.1`. If the browser is on another machine (over Tailscale, say), the page it ends on fails to load: paste its address into the field under the link. Sign out removes the stored credentials.
+
+A server that needs a registered app takes `oauth`:
+
+```json
+{
+  "mcpServers": {
+    "my-server": {
+      "url": "https://example.com/mcp",
+      "oauth": {
+        "clientId": "1234.5678",
+        "clientSecret": "${MY_SERVER_CLIENT_SECRET}",
+        "callbackPort": 3118,
+        "scope": "read write"
+      }
+    }
+  }
+}
+```
+
+- `clientId`, and `clientSecret` for a confidential client (a `${NAME}` secret, read only when a sign-in or refresh needs it).
+- `callbackPort` or `callbackUrl`: the redirect URI the app has registered. A loopback one (`http://127.0.0.1:3118/callback`) is sent exactly as written. An app that only accepts https URLs takes one that never loads; the user always pastes the address the browser ends on.
+- `scope`: scopes to request, separated by spaces. A server asking for more scope (403 `insufficient_scope`) needs a new sign-in, which asks for both.
+
+Credentials live in `~/.ultimate/mcp-auth.json` (0600), keyed by server name and URL, and every Ultimate process of the user shares them: user-level servers sign in once for all projects. A sign-in or sign-out in one process reconnects the server in the others. Access tokens are refreshed shortly before they expire and after a 401, under a lock per server so two processes never refresh the same rotating refresh token at once. A refresh that fails returns the server to needs sign-in.
 
 ## Tool
 
@@ -44,4 +72,4 @@ Servers connect when the server opens, each on its own: a failing one never bloc
 
 The status line's `mcp 2/3` chip counts connected out of configured servers, turns red while one failed, and is hidden when none is configured. Its popover lists each server with its transport, source, state or tool count, the error and the next retry, and a reconnect button. The Extensions panel's `mcp` row lists the same servers when opened.
 
-Actions: `status` → every server's state; `reconnect {name}` → connects one again and returns the states.
+Actions: `status` → every server's state; `reconnect {name}` → connects one again and returns the states. User only: `signIn {name}` → starts a sign-in and returns the states once its authorization page is known; `paste {name, url}` → finishes it with the redirect URL; `cancelSignIn {name}`; `signOut {name}` → removes the credentials and returns the states.
