@@ -29,6 +29,10 @@ const json = (response: ServerResponse, value: unknown, status = 200) =>
 async function serve() {
   let issued = 0
   const valid = new Set<string>()
+  /** Scope a `tools/call` needs; the token's granted scope by access token. */
+  let needed: string | undefined
+  const granted = new Map<string, string>()
+  const scopes: (string | null)[] = []
   const refreshes = new Map<string, string>()
   const codes = new Set<string>()
   let origin = ''
@@ -49,7 +53,8 @@ async function serve() {
     if (url.pathname === '/register')
       return json(response, { ...JSON.parse(await body(request)), client_id: 'client-1' }, 201)
     if (url.pathname === '/authorize') {
-      const code = `code-${codes.size}`
+      scopes.push(url.searchParams.get('scope'))
+      const code = `code-${codes.size}:${url.searchParams.get('scope') ?? ''}`
       codes.add(code)
       const back = new URL(url.searchParams.get('redirect_uri')!)
       back.searchParams.set('code', code)
@@ -68,6 +73,7 @@ async function serve() {
       const access = `access-${++issued}`
       const refresh = `refresh-${issued}`
       valid.add(access)
+      granted.set(access, form.get('code')?.split(':')[1] ?? '')
       refreshes.set(refresh, access)
       return json(response, {
         access_token: access,
@@ -85,6 +91,12 @@ async function serve() {
         })
         .end()
     const message = JSON.parse(await body(request))
+    if (message.method === 'tools/call' && needed && !granted.get(token)?.includes(needed))
+      return response
+        .writeHead(403, {
+          'www-authenticate': `Bearer error="insufficient_scope", scope="${needed}"`,
+        })
+        .end()
     if (message.id === undefined) return response.writeHead(202).end()
     const results: Record<string, unknown> = {
       initialize: {
@@ -110,6 +122,9 @@ async function serve() {
     /** Every access token issued so far stops working. */
     expire: () => valid.clear(),
     issued: () => issued,
+    /** From now on, calling a tool needs `scope`. */
+    require: (scope: string) => (needed = scope),
+    scopes,
   }
 }
 
@@ -160,6 +175,17 @@ it('signs in with a pasted redirect URL, refreshes a rejected token, and signs o
   remote.expire()
   expect(await echo()).toMatchObject({ output: [{ text: 'echo: hi' }], isError: false })
   expect(remote.issued()).toBe(2)
+
+  // A tool asking for more scope waits for a sign-in, which asks for that scope.
+  remote.require('write')
+  expect(await echo()).toMatchObject({ isError: true })
+  expect(status()[0].state).toBe('signin')
+  const [again] = await call('signIn')
+  const approved = await fetch(again.oauth!.signingIn!.url!, { redirect: 'manual' })
+  await call('paste', { name: 'echo', url: approved.headers.get('location') })
+  await until(() => status()[0].state === 'connected')
+  expect(remote.scopes.at(-1)).toBe('write')
+  expect(await echo()).toMatchObject({ output: [{ text: 'echo: hi' }], isError: false })
 
   await call('signOut')
   expect(status()[0]).toMatchObject({ state: 'signin', oauth: { signedIn: false } })

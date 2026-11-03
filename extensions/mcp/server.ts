@@ -76,6 +76,8 @@ type Server = Omit<McpServerStatus, 'tools' | 'oauth'> & {
   secrets: string[]
   /** OAuth servers: whether credentials are stored, the provider its connections share, and the running sign-in. */
   signedIn?: boolean
+  /** The stored access token its last connect read, to tell a new sign-in in another process from the same one. */
+  seen?: string
   auth?: McpAuthProvider
   challenge?: OAuthChallenge
   signingIn?: SigningIn
@@ -294,7 +296,6 @@ export default async function mcp(host: ExtensionHost) {
   function needsSignIn(server: Server) {
     server.client = undefined
     server.state = 'signin'
-    server.signedIn = false
   }
 
   /** An OAuth server's credentials in the shared file, keyed by its URL with its secrets resolved. */
@@ -306,13 +307,11 @@ export default async function mcp(host: ExtensionHost) {
     )
 
   /** Its `oauth` settings with the client secret read now, so a missing one fails only what needs it. */
-  async function settingsOf(server: Server): Promise<OAuthSettings> {
+  async function settingsOf(server: Server, found: string[]): Promise<OAuthSettings> {
     const { clientSecret, ...oauth } = (server.entry as { oauth: Oauth }).oauth
     return {
       ...oauth,
-      ...(clientSecret
-        ? { clientSecret: await expand(host.userHome, clientSecret, server.secrets) }
-        : {}),
+      ...(clientSecret ? { clientSecret: await expand(host.userHome, clientSecret, found) } : {}),
     }
   }
 
@@ -341,11 +340,14 @@ export default async function mcp(host: ExtensionHost) {
       const url = 'url' in entry ? await expand(host.userHome, entry.url, found) : ''
       if (usesOAuth(entry)) {
         const store = await storeOf(server)
-        server.signedIn = !!(await store.load())?.tokens
+        const tokens = (await store.load())?.tokens
+        server.signedIn = !!tokens
+        server.seen = tokens?.access_token
         server.auth ??= authProvider({
           serverUrl: url,
           store,
-          settings: () => settingsOf(server),
+          // Its secret joins whatever this connection's errors mask.
+          settings: () => settingsOf(server, server.secrets),
           onChallenge: (challenge) => {
             server.challenge = challenge
           },
@@ -475,9 +477,11 @@ export default async function mcp(host: ExtensionHost) {
     async signIn(name) {
       const server = oauthServer(name)
       if (closed || server.signingIn) return
-      // A missing secret fails the action, before anything runs.
+      // A missing secret fails the action, before anything runs. Its errors mask the secrets it read itself: a
+      // reconnect meanwhile replaces the server's own list.
+      const found: string[] = []
       const store = await storeOf(server)
-      const settings = await settingsOf(server)
+      const settings = await settingsOf(server, found)
       const serverUrl = await expand(host.userHome, (server.entry as { url: string }).url, [])
       if (server.signingIn) return
       let paste!: (url: string) => void
@@ -510,7 +514,7 @@ export default async function mcp(host: ExtensionHost) {
           (error: unknown) => {
             if (server.signingIn === run) delete server.signingIn
             if (!(error instanceof SignInCancelled))
-              server.error = `Sign-in failed: ${redact(server, error)}`
+              server.error = `Sign-in failed: ${redact({ secrets: found } as Server, error)}`
           },
         )
         .finally(shown)
@@ -529,6 +533,7 @@ export default async function mcp(host: ExtensionHost) {
       server.signingIn?.controller.abort()
       await (await storeOf(server)).remove()
       server.signedIn = false
+      delete server.challenge
       await restart(server)
     },
   })
@@ -537,32 +542,35 @@ export default async function mcp(host: ExtensionHost) {
   const oauth = [...servers.values()].filter((server) => usesOAuth(server.entry))
   let watcher: FSWatcher | undefined
   let settle: ReturnType<typeof setTimeout> | undefined
-  const recheck = async () => {
-    for (const server of oauth) {
-      if (closed || server.connecting || server.signingIn) continue
-      const signedIn = !!(await (await storeOf(server)).load())?.tokens
-      if (signedIn === server.signedIn) continue
-      server.signedIn = signedIn
-      if (signedIn ? server.state === 'signin' : server.state === 'connected')
-        // restart never rejects; the server's state shows how it went.
-        // oxlint-disable-next-line typescript/no-floating-promises -- see above.
-        void restart(server)
-    }
-  }
+  // Each check waits for the server's connect, so a change that lands while it connects is still seen.
+  const recheck = () =>
+    Promise.all(
+      oauth.map(async (server) => {
+        await server.connecting
+        if (closed || server.signingIn) return
+        let tokens
+        try {
+          tokens = (await (await storeOf(server)).load())?.tokens
+        } catch (error) {
+          // The next change or reconnect reads the file again.
+          console.warn('MCP sign-in check', error instanceof Error ? error.message : error)
+          return
+        }
+        server.signedIn = !!tokens
+        const signedInElsewhere =
+          server.state === 'signin' && !!tokens && tokens.access_token !== server.seen
+        const signedOutElsewhere = server.state === 'connected' && !tokens
+        if (signedInElsewhere || signedOutElsewhere) await restart(server)
+      }),
+    )
   if (oauth.length) {
     await mkdir(join(host.userHome, '.ultimate'), { recursive: true })
     const file = basename(authFile(host.userHome))
     watcher = watch(join(host.userHome, '.ultimate'), (_event, changed) => {
       if (changed !== file) return
       clearTimeout(settle)
-      settle = setTimeout(
-        () =>
-          void recheck().catch((error: unknown) =>
-            // The next change or reconnect reads the file again.
-            console.warn('MCP sign-in check', error instanceof Error ? error.message : error),
-          ),
-        200,
-      )
+      // recheck never rejects: each server reports into its own state.
+      settle = setTimeout(() => void recheck(), 200)
     })
   }
 
@@ -636,6 +644,15 @@ export default async function mcp(host: ExtensionHost) {
                   error instanceof McpTimeoutError ||
                   error instanceof McpAbortError
                 )
+                if (server.auth && authRequired(error) && server.client === client) {
+                  // Refreshing did not help, or this tool wants more scope: reconnecting would accept the same token,
+                  // so wait for a sign-in, which asks for the challenged scope.
+                  needsSignIn(server)
+                  await close(client)
+                  return failure(
+                    `MCP server ${name} needs you to sign in again (mcp in the status bar), then retry.`,
+                  )
+                }
                 // restart never rejects; the server's state shows how it went.
                 // oxlint-disable-next-line typescript/no-floating-promises -- see above.
                 if (broken && server.client === client) void restart(server)

@@ -22,7 +22,9 @@ import {
   authorizeMcp,
   McpOAuthAuthorizationRequiredError,
   McpOAuthProvider,
+  MemoryOAuthStateStore,
   OAuthCallbackServer,
+  OAuthError,
   parseWwwAuthenticate,
   stepUpScope,
 } from '@earendil-works/pi-mcp/oauth'
@@ -109,17 +111,21 @@ export function serverStore(userHome: string, name: string, serverUrl: string): 
       change((states) => {
         states[key] = state
       }),
+    // Under the refresh lock, so a refresh in flight saves its tokens first instead of restoring them after.
     remove: () =>
-      change((states) => {
-        const stored = key in states
-        delete states[key]
-        return stored
-      }),
-    withRefreshLock: async (fn) => {
-      await mkdir(join(userHome, '.ultimate'), { recursive: true, mode: 0o700 })
-      const hash = createHash('sha256').update(key).digest('hex').slice(0, 16)
-      return withLock(join(userHome, `.ultimate/.mcp-auth-refresh-${hash}`), fn)
-    },
+      refreshLock(() =>
+        change((states) => {
+          const stored = key in states
+          delete states[key]
+          return stored
+        }),
+      ),
+    withRefreshLock: (fn) => refreshLock(fn),
+  }
+  async function refreshLock<T>(fn: () => Promise<T>) {
+    await mkdir(join(userHome, '.ultimate'), { recursive: true, mode: 0o700 })
+    const hash = createHash('sha256').update(key).digest('hex').slice(0, 16)
+    return withLock(join(userHome, `.ultimate/.mcp-auth-refresh-${hash}`), fn)
   }
 }
 
@@ -244,6 +250,12 @@ export function authProvider(options: {
         )
         if (result === 'REDIRECT') throw new McpOAuthAuthorizationRequiredError()
       })
+      .catch((error: unknown) => {
+        // The authorization server refused the grant (invalid_grant, invalid_scope, …): only a new sign-in helps.
+        if (error instanceof OAuthError && error.code !== 'server_error')
+          throw new McpOAuthAuthorizationRequiredError()
+        throw error
+      })
       .finally(() => {
         refreshing = undefined
       })
@@ -322,9 +334,13 @@ async function listen(settings: ReturnType<typeof callbackSettings>, port: numbe
 }
 
 /**
- * Sign in to an MCP server: with the stored refresh token when possible, otherwise through the browser. `show`
- * receives the authorization URL; `pasted` resolves with the redirect URL the user pasted, for a browser that cannot
- * reach the loopback callback, whichever arrives first. Aborting `signal` stops it with `SignInCancelled`.
+ * Sign in to an MCP server through the browser. `show` receives the authorization URL; `pasted` resolves with the
+ * redirect URL the user pasted, for a browser that cannot reach the loopback callback, whichever arrives first.
+ * Aborting `signal` stops it with `SignInCancelled`.
+ *
+ * The flow's PKCE verifier and state stay in memory, so sign-ins in two processes cannot overwrite each other's; only
+ * its result (client and tokens) reaches the shared file, under the refresh lock. It never refreshes: the server asks
+ * for a sign-in only once refreshing failed.
  */
 export async function signIn(options: {
   serverUrl: string
@@ -338,6 +354,7 @@ export async function signIn(options: {
   const { serverUrl, store, settings, signal } = options
   if (signal.aborted) throw new SignInCancelled()
   const stored = await store.load()
+  const flowStore = new MemoryOAuthStateStore()
   const stepUp = options.challenge?.error === 'insufficient_scope'
   const callbackOptions = callbackSettings(settings)
   // Reuse the port of the registered redirect URI so the registered client stays valid.
@@ -349,23 +366,21 @@ export async function signIn(options: {
   )
   const redirectUrl = callbackOptions.fixedRedirectUrl ?? callback.redirectUrl
   try {
-    if (stored) {
-      const next = { ...stored }
-      // Every sign-in gets a fresh `state` parameter.
-      delete next.oauthState
-      // A registered client cannot use another redirect URI, and its tokens belong to it.
-      if (
-        !settings.clientId &&
-        !registeredRedirectUrls(stored.clientInformation).includes(redirectUrl)
-      ) {
-        delete next.clientInformation
-        delete next.tokens
-        delete next.tokensExpireAt
-      }
-      await store.save(next)
+    const next = { ...stored, serverUrl: new URL(serverUrl).href }
+    delete next.oauthState
+    delete next.codeVerifier
+    // A registered client cannot use another redirect URI, and its tokens belong to it.
+    if (
+      !settings.clientId &&
+      !registeredRedirectUrls(stored?.clientInformation).includes(redirectUrl)
+    ) {
+      delete next.clientInformation
+      delete next.tokens
+      delete next.tokensExpireAt
     }
+    flowStore.save(next)
     let authorizationUrl: URL | undefined
-    const oauth = provider(serverUrl, store, settings, redirectUrl, (url) => {
+    const oauth = provider(serverUrl, flowStore, settings, redirectUrl, (url) => {
       authorizationUrl = url
     })
     const flow = {
@@ -382,8 +397,7 @@ export async function signIn(options: {
           : options.challenge?.scope,
       ),
     }
-    // A refresh keeps the granted scope; a server asking for more needs the browser flow.
-    if ((await authorizeMcp(oauth, { ...flow, skipRefresh: stepUp })) === 'AUTHORIZED') return
+    await authorizeMcp(oauth, { ...flow, skipRefresh: true })
     if (!authorizationUrl) throw new Error('OAuth flow did not produce an authorization URL')
     const state = await oauth.state()
     // The flow picks the redirect URI, which may be specific to the MCP server.
@@ -401,6 +415,8 @@ export async function signIn(options: {
       })
     const { code, iss } = await Promise.race([fromBrowser, fromUser, cancelled])
     await authorizeMcp(oauth, { ...flow, authorizationCode: code, iss })
+    const { codeVerifier: _verifier, oauthState: _state, ...result } = flowStore.load()!
+    await store.withRefreshLock(async () => store.save(result))
   } catch (error) {
     // Aborted requests fail with the signal's reason; report them as the cancellation they are.
     if (signal.aborted) throw new SignInCancelled()
