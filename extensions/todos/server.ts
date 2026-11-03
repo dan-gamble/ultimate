@@ -2,7 +2,7 @@
  * To-dos: one short list per project on the root conversation, each item owned by the user or @ultimate. @ultimate
  * keeps it with its `todo` tool and hears about it when it changed; the user adds and ticks in the To-dos panel.
  */
-import { Type } from 'typebox'
+import { int, obj, oneOf, opt, str } from '@earendil-works/pi-schema'
 import {
   defineDoc,
   defineExtension,
@@ -171,12 +171,12 @@ export default function todosExtension(host: ExtensionHost) {
         deferred: true,
         description:
           "The project's to-dos, owned by you ('ultimate') or the user ('user'): add {text, owner, link?}, done {id}, list. Keep open loops here, not in codemode store; the user sees and ticks them in the To-dos panel and counts them as waiting on them, and their open questions already show there, so never add a to-do for a question. Give link where the user acts, such as the pull request to merge. Other projects read this list with ultimate.doc('todos', 1, {project}) and ask you to add through ultimate.tell.",
-        parameters: Type.Object({
-          action: Type.Union([Type.Literal('add'), Type.Literal('done'), Type.Literal('list')]),
-          text: Type.Optional(Type.String()),
-          owner: Type.Optional(Type.Union([Type.Literal('user'), Type.Literal('ultimate')])),
-          link: Type.Optional(Type.String({ description: 'http(s) URL where it gets done' })),
-          id: Type.Optional(Type.Integer({ minimum: 1 })),
+        parameters: obj({
+          action: oneOf(['add', 'done', 'list']),
+          text: opt(str()),
+          owner: opt(oneOf(['user', 'ultimate'])),
+          link: opt(str({ description: 'http(s) URL where it gets done' })),
+          id: opt(int({ minimum: 1 })),
         }),
         // Not replay-safe (the default): an interrupted add is never rerun, so it commits at most once.
         async execute(args, api, ctx) {
