@@ -7,7 +7,7 @@ import {
   PlugIcon,
   RefreshCwIcon,
 } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import {
@@ -21,6 +21,7 @@ import {
   useCopy,
   useEvent,
   useNow,
+  useSystem,
 } from '@/sdk'
 import { ExtensionDetails } from '../onboarding/ui.tsx'
 import {
@@ -35,10 +36,13 @@ import type { McpServerStatus } from './refs.ts'
 
 /**
  * Every server's state, read again every few seconds while one is connecting, just after the next retry of a failed
- * one, and every minute otherwise.
+ * one, when the server facet reinstalls (a saved `mcpServers`), and every minute otherwise.
  */
 function useServers(enabled = true) {
   const status = useAction(StatusAction, null, { enabled, onError: () => {} })
+  const loadedAt = useSystem()?.extensions.find((extension) => extension.name === 'mcp')?.server
+    ?.loadedAt
+  const seen = useRef(loadedAt)
   const settling =
     status.data?.some((server) => server.state === 'connecting' || server.oauth?.signingIn) ?? false
   const now = useNow(settling ? 2_000 : 60_000)
@@ -53,6 +57,13 @@ function useServers(enabled = true) {
     // oxlint-disable-next-line typescript/no-floating-promises -- useAction reports failures and resolves undefined rather than rejecting.
     if (enabled) void refetch()
   }, [enabled, now, refetch])
+  // Saving settings reinstalls the facet with the new list of servers.
+  useEffect(() => {
+    if (loadedAt === seen.current) return
+    seen.current = loadedAt
+    // oxlint-disable-next-line typescript/no-floating-promises -- useAction reports failures and resolves undefined rather than rejecting.
+    if (enabled) void refetch()
+  }, [enabled, loadedAt, refetch])
   useEffect(() => {
     if (!enabled || retry === Infinity) return undefined
     // oxlint-disable-next-line typescript/no-floating-promises -- useAction reports failures and resolves undefined rather than rejecting.
@@ -269,7 +280,7 @@ function Chip() {
   const signin = servers.some((server) => server.state === 'signin')
   const refresh = () => void refetch()
   return (
-    <Popover>
+    <Popover onOpenChange={(open) => open && refresh()}>
       <PopoverTrigger asChild>
         <button
           aria-label="MCP servers"

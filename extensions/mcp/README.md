@@ -26,7 +26,7 @@ Connects the MCP servers in `mcpServers` and lets agents use their tools through
 - **Precedence:** user and project servers merge by name; a project entry replaces a user entry of the same name. Project servers run commands, so they load only once the project's setup is trusted (`host.projectSettings()` is empty before).
 - `"disabled": true` leaves a server out.
 
-Saving either settings file reconnects every server.
+Saving either settings file reconnects every server, and the status line chip and Extensions panel show the new list at once.
 
 ## OAuth
 
@@ -70,6 +70,6 @@ Servers connect when the server opens, each on its own: a failing one never bloc
 
 ## UI
 
-The status line's `mcp 2/3` chip counts connected out of configured servers, turns red while one failed, and is hidden when none is configured. Its popover lists each server with its transport, source, state or tool count, the error and the next retry, and a reconnect button. The Extensions panel's `mcp` row lists the same servers when opened.
+The status line's `mcp 2/3` chip counts connected out of configured servers, turns red while one failed, and is hidden when none is configured. Its popover lists each server with its transport, source, state or tool count, the error and the next retry, and a reconnect button, read again each time it opens. The Extensions panel's `mcp` row lists the same servers when opened.
 
 Actions: `status` → every server's state; `reconnect {name}` → connects one again and returns the states. User only: `signIn {name}` → starts a sign-in and returns the states once its authorization page is known; `paste {name, url}` → finishes it with the redirect URL; `cancelSignIn {name}`; `signOut {name}` → removes the credentials and returns the states.
