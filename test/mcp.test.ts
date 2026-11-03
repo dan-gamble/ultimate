@@ -166,3 +166,38 @@ it('declares each ${NAME} of the configured servers as a secret, missing until i
   await writeSecret(root, 'CF_ACCESS_CLIENT_ID', 'id')
   expect(await list()).toMatchObject([{ name: 'CF_ACCESS_CLIENT_ID', set: true }])
 })
+
+// Regression: saving a missing secret left the server failed until its next retry, minutes away after a few failures.
+it('connects a server as soon as its missing secret is saved', async () => {
+  const root = await temp()
+  cleanup.push(() => removeTemp(root))
+  const url = await serve('s3cret')
+  await mkdir(join(root, '.ultimate'), { recursive: true })
+  await writeFile(
+    join(root, '.ultimate/settings.json'),
+    JSON.stringify({
+      mcpServers: { echo: { url, headers: { Authorization: 'Bearer ${ECHO_TOKEN}' } } },
+    }),
+  )
+  const closers: (() => Promise<void>)[] = []
+  const host = {
+    userHome: root,
+    projectRoot: root,
+    projectSettings: async () => ({}),
+    onOpen: (callback: () => Promise<void>) => void callback(),
+    onClose: (callback: () => Promise<void>) => closers.push(callback),
+  } as unknown as ExtensionHost
+  await mcp(host)
+  cleanup.push(async () => {
+    for (const close of closers) await close()
+  })
+  const status = () => actions.status(null, { host } as never) as unknown as McpServerStatus[]
+  await until(() => status()[0].state === 'failed')
+  expect(status()[0]).toMatchObject({ missing: 'ECHO_TOKEN' })
+
+  // Well before the first retry, 5 s after the failure.
+  const saved = Date.now()
+  await writeSecret(root, 'ECHO_TOKEN', 's3cret')
+  await until(() => status()[0].state === 'connected')
+  expect(Date.now() - saved).toBeLessThan(2_000)
+})

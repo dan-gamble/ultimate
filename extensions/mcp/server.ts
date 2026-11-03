@@ -572,14 +572,41 @@ export default async function mcp(host: ExtensionHost) {
         if (signedInElsewhere || signedOutElsewhere) await restart(server)
       }),
     )
-  if (oauth.length) {
+  // A secret a failed server missed, saved in the Secrets panel of any project, connects it at once.
+  const secretAdded = () =>
+    Promise.all(
+      [...servers.values()].map(async (server) => {
+        await server.connecting
+        if (closed || !server.missing) return
+        try {
+          if ((await readSecret(host.userHome, server.missing)) === undefined) return
+        } catch (error) {
+          // An unreadable store: the server's next retry reports it.
+          console.warn('MCP secret check', error instanceof Error ? error.message : error)
+          return
+        }
+        await restart(server)
+      }),
+    )
+  if (servers.size) {
     await mkdir(join(host.userHome, '.ultimate'), { recursive: true })
-    const file = basename(authFile(host.userHome))
+    const checks = new Map([
+      [basename(authFile(host.userHome)), recheck],
+      ['secrets.json', secretAdded],
+    ])
+    let due = new Set<() => Promise<unknown>>()
     watcher = watch(join(host.userHome, '.ultimate'), (_event, changed) => {
-      if (changed !== file) return
+      const changedCheck = checks.get(String(changed))
+      if (!changedCheck) return
+      due.add(changedCheck)
       clearTimeout(settle)
-      // recheck never rejects: each server reports into its own state.
-      settle = setTimeout(() => void recheck(), 200)
+      settle = setTimeout(() => {
+        const run = due
+        due = new Set()
+        // Checks never reject: each server reports into its own state.
+        // oxlint-disable-next-line typescript/no-floating-promises -- see above.
+        for (const check of run) void check()
+      }, 200)
     })
   }
 

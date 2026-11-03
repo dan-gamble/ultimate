@@ -44,6 +44,11 @@ function useServers(enabled = true) {
   const now = useNow(settling ? 2_000 : 60_000)
   const retry = Math.min(...(status.data ?? []).map((server) => server.retryAt ?? Infinity))
   const { refetch } = status
+  // A saved secret reconnects the servers missing it on the server; the list shows them connecting.
+  useEvent('secrets:changed', () => {
+    // oxlint-disable-next-line typescript/no-floating-promises -- useAction reports failures and resolves undefined rather than rejecting.
+    if (enabled) void setTimeout(() => void refetch(), 400)
+  })
   useEffect(() => {
     // oxlint-disable-next-line typescript/no-floating-promises -- useAction reports failures and resolves undefined rather than rejecting.
     if (enabled) void refetch()
@@ -164,12 +169,6 @@ function Row({ server, onChanged }: { server: McpServerStatus; onChanged: () => 
   }
   const reconnect = () => run(ReconnectAction)
   const signingIn = server.oauth?.signingIn
-  // Its missing secret, once saved in the Secrets panel, connects it again at once instead of at the next retry.
-  useEvent('secrets:changed', (data) => {
-    if (server.missing && (data as { name?: unknown } | undefined)?.name === server.missing)
-      // oxlint-disable-next-line typescript/no-floating-promises -- reconnect reports its failure in the row.
-      void reconnect()
-  })
   const retry = server.retryAt && Math.max(0, Math.ceil((server.retryAt - now) / 1000))
   return (
     <li className="px-2 py-1.5" data-mcp-server={server.name} data-state={server.state}>
