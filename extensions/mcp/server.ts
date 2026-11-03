@@ -293,7 +293,16 @@ export default async function mcp(host: ExtensionHost) {
   }
 
   /** Waits for the user: no retry, since only a sign-in (here or in another process) changes the answer. */
-  function needsSignIn(server: Server) {
+  async function needsSignIn(server: Server) {
+    // The token the server just rejected, possibly refreshed during this connection: only a different one, from a
+    // sign-in in another process, reconnects it. Read before the state changes, so the watcher never sees `signin`
+    // with an older token.
+    try {
+      server.seen = (await (await storeOf(server)).load())?.tokens?.access_token
+    } catch (error) {
+      // Keeps the token read at connect; the server still waits for a sign-in.
+      console.warn('MCP sign-in state', error instanceof Error ? error.message : error)
+    }
     server.client = undefined
     server.state = 'signin'
   }
@@ -386,7 +395,7 @@ export default async function mcp(host: ExtensionHost) {
     } catch (error) {
       if (closed || server.client !== client) return
       if (server.auth && authRequired(error)) {
-        needsSignIn(server)
+        await needsSignIn(server)
         await close(client)
         return
       }
@@ -482,7 +491,7 @@ export default async function mcp(host: ExtensionHost) {
       const found: string[] = []
       const store = await storeOf(server)
       const settings = await settingsOf(server, found)
-      const serverUrl = await expand(host.userHome, (server.entry as { url: string }).url, [])
+      const serverUrl = await expand(host.userHome, (server.entry as { url: string }).url, found)
       if (server.signingIn) return
       let paste!: (url: string) => void
       const pasted = new Promise<string>((resolve) => (paste = resolve))
@@ -647,7 +656,7 @@ export default async function mcp(host: ExtensionHost) {
                 if (server.auth && authRequired(error) && server.client === client) {
                   // Refreshing did not help, or this tool wants more scope: reconnecting would accept the same token,
                   // so wait for a sign-in, which asks for the challenged scope.
-                  needsSignIn(server)
+                  await needsSignIn(server)
                   await close(client)
                   return failure(
                     `MCP server ${name} needs you to sign in again (mcp in the status bar), then retry.`,
