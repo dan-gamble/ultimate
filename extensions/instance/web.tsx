@@ -1,4 +1,4 @@
-import { ChevronRightIcon, ExternalLinkIcon } from 'lucide-react'
+import { ChevronDownIcon, ChevronRightIcon, ExternalLinkIcon } from 'lucide-react'
 import { useEffect, useSyncExternalStore } from 'react'
 import type { MouseEvent, ReactNode } from 'react'
 import { Shimmer } from '@/components/ai/shimmer'
@@ -14,7 +14,6 @@ import {
 import {
   cn,
   defineWebExtension,
-  ProjectChip,
   shortenPath,
   useAction,
   useConversations,
@@ -306,32 +305,40 @@ function PreviewLink({
 const count = (n: number, noun: string) => (n ? [`${n} ${noun}${n === 1 ? '' : 's'}`] : [])
 
 /**
- * The title bar's project chip as a menu of "This project", the other projects running on this machine and the previews
- * `instance` runs. A plain chip while there are none; the lists refresh when the menu opens.
+ * The other projects running on this machine and the previews `instance` runs, as a chip after the project chip while
+ * any runs: its menu lists "This project", each project and each preview, and refreshes when it opens. It leaves the
+ * project chip itself to `titlebar.project`.
  */
 function Switcher() {
   const current = useShown()
   const data = usePreviews()?.filter((preview) => preview.running) ?? []
   const others = useProjects() ?? []
   const conversations = useConversations()
-  if (!data.length && !others.length) return <ProjectChip />
+  if (!data.length && !others.length) return null
   const title = (preview: Preview) =>
     conversations.find((conversation) => conversation.id === preview.conversationId)?.title
   return (
     <DropdownMenu modal={false} onOpenChange={(open) => open && refetch()}>
       <DropdownMenuTrigger asChild>
-        <ProjectChip className={cn(current && 'bg-brand/10')} menu>
+        <button
+          className={cn(
+            'flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2 font-mono text-[11.5px] text-muted-foreground transition-colors outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring data-[state=open]:bg-accent',
+            current && 'bg-brand/10',
+          )}
+          type="button"
+        >
           {current ? (
-            <span className="flex shrink-0 items-center gap-1.5 font-mono text-[11.5px] text-muted-foreground">
+            <>
               <span className="size-1.5 rounded-full bg-brand" />
               {current.chip}
-            </span>
+            </>
           ) : (
-            <span className="shrink-0 font-mono text-[11.5px] text-muted-foreground max-md:hidden">
+            <span className="max-md:hidden">
               {[...count(others.length, 'project'), ...count(data.length, 'preview')].join(' · ')}
             </span>
           )}
-        </ProjectChip>
+          <ChevronDownIcon className="size-3.5 opacity-60" />
+        </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-80" sideOffset={4}>
         <DropdownMenuLabel className="px-2 pt-1 pb-1.5 section-label">Instances</DropdownMenuLabel>
@@ -411,5 +418,5 @@ function Embedded() {
 export default defineWebExtension({
   tools: { instance: InstanceCall },
   link: PreviewLink,
-  slots: { 'titlebar.project': loopback ? [Switcher] : [], overlay: [Poll, Embedded] },
+  slots: { 'titlebar.left': loopback ? [Switcher] : [], overlay: [Poll, Embedded] },
 })

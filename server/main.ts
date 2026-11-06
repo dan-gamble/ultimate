@@ -26,6 +26,15 @@ import type { Notice } from '../shared/protocol.ts'
 
 const send = (message: ChildMessage) => process.send?.(message)
 
+/**
+ * Clickjacking: a foreign page must not load the UI in a hidden frame and steer clicks into it (PR #74, #517728).
+ * Loopback parents stay allowed: a preview frames another instance on its own port (`extensions/instance/web.tsx`),
+ * and the supervisor's app window is `ultimate.localhost`. No `[::1]` entry: CSP rejects a port range on an IPv6
+ * literal, and one bad source makes browsers drop the whole directive.
+ */
+const frameAncestors =
+  "frame-ancestors 'self' http://127.0.0.1:* http://localhost:* http://*.localhost:*"
+
 export interface ServerOptions extends HostOptions {
   port?: number
   publicUrl?: string
@@ -87,6 +96,7 @@ export async function prepareServer(options: Partial<ServerOptions> = {}) {
         response.end('Preparing')
         return
       }
+      response.setHeader('Content-Security-Policy', frameAncestors)
       if (await api.handle(request, response)) return
       if (request.method !== 'GET' && request.method !== 'HEAD') {
         response.writeHead(405)
